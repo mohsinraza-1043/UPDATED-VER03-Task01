@@ -11,7 +11,7 @@ import random
 # Save location
 data_path = r'D:\INTERNSHIP'
 
-class ComprehensiveArticleScraper:
+class ImprovedNewsScraper:
     def __init__(self, delay_range=(1, 3)):
         self.delay_range = delay_range
         self.session = requests.Session()
@@ -34,9 +34,7 @@ class ComprehensiveArticleScraper:
     def get_page_content(self, url):
         """Fetch page content with error handling and rate limiting"""
         try:
-            # Add random delay to avoid being blocked
             time.sleep(random.uniform(*self.delay_range))
-            
             response = self.session.get(url, timeout=20)
             response.raise_for_status()
             return BeautifulSoup(response.content, 'html.parser')
@@ -44,157 +42,166 @@ class ComprehensiveArticleScraper:
             print(f"❌ Error fetching {url}: {str(e)}")
             return None
     
-    def extract_date(self, block, fallback_date="No Date"):
-        """Extract date from various possible locations"""
+    def extract_date(self, block):
+        """Improved date extraction with multiple fallback strategies"""
         date_selectors = [
-            'time[datetime]', 'time',
-            '.date', '.publish-date', '.post-date', '.article-date',
-            '.meta-date', '.entry-date', '.published', '.timestamp',
-            '[datetime]', '[data-date]', '.time', '.pub-time',
-            '.article-time', '.news-time', '.post-time'
+            ('time[datetime]', lambda el: el.get('datetime')),
+            ('time', lambda el: el.get('datetime') or el.get_text()),
+            ('[itemprop="datePublished"]', lambda el: el.get('content') or el.get('datetime') or el.get_text()),
+            ('.date', lambda el: el.get_text()),
+            ('.publish-date', lambda el: el.get_text()),
+            ('.post-date', lambda el: el.get_text()),
+            ('.article-date', lambda el: el.get_text()),
+            ('.timestamp', lambda el: el.get_text()),
+            ('[datetime]', lambda el: el.get('datetime')),
+            ('[data-date]', lambda el: el.get('data-date')),
+            ('.meta-date', lambda el: el.get_text())
         ]
         
-        for selector in date_selectors:
+        # Try to find date in the block itself
+        for selector, extractor in date_selectors:
             date_elem = block.select_one(selector)
             if date_elem:
-                # Try to get datetime attribute first
-                date_text = (date_elem.get('datetime') or 
-                           date_elem.get('data-date') or 
-                           date_elem.get('title') or
-                           date_elem.get_text(strip=True))
-                if date_text and date_text.strip() and date_text != "No Date":
-                    normalized = self.normalize_date(date_text)
-                    if normalized != date_text:  # Successfully normalized
+                date_text = extractor(date_elem)
+                if date_text:
+                    normalized = self.normalize_date(date_text.strip())
+                    if normalized:
                         return normalized
         
-        # Try to find date in parent elements
-        parent = block.parent if block.parent else block
-        for selector in date_selectors:
-            date_elem = parent.select_one(selector)
-            if date_elem:
-                date_text = (date_elem.get('datetime') or 
-                           date_elem.get('data-date') or 
-                           date_elem.get_text(strip=True))
-                if date_text and date_text.strip():
-                    normalized = self.normalize_date(date_text)
-                    if normalized != date_text:
-                        return normalized
+        # Check parent elements if not found
+        parent = block.parent
+        for _ in range(3):  # Check up to 3 parent levels
+            if parent:
+                for selector, extractor in date_selectors:
+                    date_elem = parent.select_one(selector)
+                    if date_elem:
+                        date_text = extractor(date_elem)
+                        if date_text:
+                            normalized = self.normalize_date(date_text.strip())
+                            if normalized:
+                                return normalized
+                parent = parent.parent
         
-        return fallback_date
+        # Final fallback to current date if nothing found
+        return datetime.now().strftime('%m/%d/%Y')
     
     def normalize_date(self, date_str):
-        """Normalize date format"""
-        try:
-            # Clean the date string
-            date_str = re.sub(r'^(published|posted|on|updated)\s*:?\s*', '', date_str.strip(), flags=re.IGNORECASE)
-            date_str = re.sub(r'\s+', ' ', date_str)  # Remove extra spaces
+        """Normalize various date formats to MM/DD/YYYY"""
+        if not date_str:
+            return None
             
-            # Try to parse various date formats
-            date_patterns = [
-                '%Y-%m-%dT%H:%M:%S.%fZ',
-                '%Y-%m-%dT%H:%M:%SZ',
-                '%Y-%m-%dT%H:%M:%S',
-                '%Y-%m-%d %H:%M:%S',
-                '%Y-%m-%d',
-                '%B %d, %Y',
-                '%b %d, %Y',
-                '%d %B %Y',
-                '%d %b %Y',
-                '%m/%d/%Y',
-                '%d/%m/%Y',
-                '%Y/%m/%d',
-                '%d-%m-%Y',
-                '%m-%d-%Y'
-            ]
-            
-            for pattern in date_patterns:
-                try:
-                    # Extract only the part that matches the pattern length
-                    test_str = date_str[:len(pattern.replace('%f', '000000'))]
-                    parsed_date = datetime.strptime(test_str, pattern)
-                    return parsed_date.strftime('%Y-%m-%d')
-                except ValueError:
-                    continue
-            
-            # Try regex patterns for common formats
-            regex_patterns = [
-                (r'(\d{4})-(\d{1,2})-(\d{1,2})', lambda m: f"{m.group(1)}-{m.group(2).zfill(2)}-{m.group(3).zfill(2)}"),
-                (r'(\d{1,2})/(\d{1,2})/(\d{4})', lambda m: f"{m.group(3)}-{m.group(1).zfill(2)}-{m.group(2).zfill(2)}"),
-                (r'(\d{1,2})-(\d{1,2})-(\d{4})', lambda m: f"{m.group(3)}-{m.group(1).zfill(2)}-{m.group(2).zfill(2)}")
-            ]
-            
-            for pattern, formatter in regex_patterns:
-                match = re.search(pattern, date_str)
-                if match:
-                    return formatter(match)
-                    
-            return date_str  # Return original if can't parse
-        except Exception:
-            return date_str
-    
-    def extract_article_data(self, block, base_url, section_name=""):
-        """Extract article data from a block element"""
-        # Title extraction with multiple fallbacks
-        title_selectors = [
-            'h1', 'h2', 'h3', 'h4', 'h5',
-            '.title', '.headline', '.post-title', '.article-title',
-            '.entry-title', '.news-title', '.story-title',
-            'a[title]', '.link-title'
+        # Clean the date string
+        date_str = re.sub(r'^(published|posted|on|updated)\s*:?\s*', '', date_str, flags=re.IGNORECASE)
+        date_str = re.sub(r'\s+', ' ', date_str.strip())
+        
+        # Common date patterns
+        patterns = [
+            '%Y-%m-%dT%H:%M:%S.%fZ',
+            '%Y-%m-%dT%H:%M:%SZ',
+            '%Y-%m-%d %H:%M:%S',
+            '%Y-%m-%d',
+            '%B %d, %Y',
+            '%b %d, %Y',
+            '%d %B %Y',
+            '%d %b %Y',
+            '%m/%d/%Y',
+            '%d/%m/%Y',
+            '%Y/%m/%d',
+            '%d-%m-%Y',
+            '%m-%d-%Y'
         ]
         
-        title = "No Title"
-        link = base_url
+        for pattern in patterns:
+            try:
+                parsed_date = datetime.strptime(date_str[:len(pattern)], pattern)
+                return parsed_date.strftime('%m/%d/%Y')
+            except ValueError:
+                continue
         
-        for selector in title_selectors:
-            title_elem = block.select_one(selector)
-            if title_elem:
-                # Get title text
-                title_text = title_elem.get('title') or title_elem.get_text(strip=True)
-                if title_text and len(title_text.strip()) > 3:
-                    title = title_text.strip()
-                    
-                    # Try to find link in title element or its children
-                    link_elem = title_elem if title_elem.name == 'a' else title_elem.find('a')
-                    if link_elem and link_elem.get('href'):
-                        link = urljoin(base_url, link_elem['href'])
-                    break
+        # Try to extract date from text using regex
+        date_regex = [
+            (r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})', lambda m: f"{m.group(1)}/{m.group(2)}/{m.group(3)}"),
+            (r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})', lambda m: f"{m.group(2)}/{m.group(3)}/{m.group(1)}")
+        ]
         
-        # If no link found in title, look for other link patterns
-        if link == base_url:
-            link_selectors = [
-                'a[href]',
-                '.read-more a', '.continue-reading a', '.view-more a',
-                '.post-link', '.article-link', '.news-link',
-                '.story-link', '.permalink'
-            ]
-            for selector in link_selectors:
-                link_elem = block.select_one(selector)
-                if link_elem and link_elem.get('href'):
-                    href = link_elem['href']
-                    if href and not href.startswith('#') and not href.startswith('javascript'):
-                        link = urljoin(base_url, href)
-                        break
+        for pattern, formatter in date_regex:
+            match = re.search(pattern, date_str)
+            if match:
+                try:
+                    return formatter(match)
+                except:
+                    continue
+        
+        return None
+    
+    def extract_description(self, block):
+        """Extract article description with better filtering"""
+        desc_selectors = [
+            '.article-summary', '.entry-summary', '.post-excerpt',
+            '.excerpt', '.summary', '.description', 
+            '[itemprop="description"]', '.article-content p:first-of-type',
+            '.content p:first-of-type', '.lead', '.snippet'
+        ]
+        
+        # Try specific description selectors first
+        for selector in desc_selectors:
+            desc_elem = block.select_one(selector)
+            if desc_elem:
+                desc_text = desc_elem.get_text(' ', strip=True)
+                if len(desc_text) > 30 and not any(x in desc_text.lower() for x in ['read more', 'continue reading']):
+                    return desc_text[:500]  # Limit length
+        
+        # Fallback to first meaningful paragraph
+        for p in block.find_all('p'):
+            text = p.get_text(' ', strip=True)
+            if len(text) > 50 and not any(x in text.lower() for x in ['read more', 'click here']):
+                return text[:500]
+        
+        return ""
+    
+    def extract_article_data(self, block, base_url, section_name=""):
+        """Extract article data with better filtering"""
+        # Skip navigation and non-article blocks
+        skip_keywords = ['menu', 'navigation', 'search', 'login', 'sign up', 'subscribe', 'about', 'contact']
+        
+        # Title extraction
+        title = None
+        title_elem = (block.find(['h1', 'h2', 'h3']) or 
+                     block.select_one('.title, .headline, .post-title, .article-title, .entry-title'))
+        
+        if title_elem:
+            title = title_elem.get_text(strip=True)
+            if any(kw in title.lower() for kw in skip_keywords) or len(title) < 5:
+                return None
+        
+        # Link extraction
+        link = None
+        link_elem = (block.find('a', href=True) or 
+                    title_elem.find('a', href=True) if title_elem else None)
+        
+        if link_elem and link_elem['href'] and not link_elem['href'].startswith(('javascript:', '#')):
+            link = urljoin(base_url, link_elem['href'])
+        
+        if not link or link == base_url:
+            return None
+        
+        # Skip if already visited
+        if link in self.visited_urls:
+            return None
         
         # Date extraction
         date = self.extract_date(block)
         
         # Description extraction
-        desc_selectors = [
-            '.excerpt', '.summary', '.description', '.post-excerpt',
-            '.article-summary', '.entry-summary', '.story-summary',
-            '.news-summary', '.abstract', '.lead', '.snippet',
-            'p', '.content p'
-        ]
+        description = self.extract_description(block)
         
-        description = "No Description"
-        for selector in desc_selectors:
-            desc_elem = block.select_one(selector)
-            if desc_elem:
-                desc_text = desc_elem.get_text(strip=True)
-                # Filter out very short or navigation-like text
-                if desc_text and len(desc_text) > 20 and not any(nav_word in desc_text.lower() for nav_word in ['read more', 'continue reading', 'view more', 'click here']):
-                    description = desc_text[:500]  # Limit description length
-                    break
+        # Skip if no meaningful content
+        if not title or (not description and len(block.get_text(strip=True)) < 100):
+            return None
+        
+        # Clean section name
+        if not section_name or section_name.lower() in ['home', 'main']:
+            section_name = "Main"
         
         return {
             'date': date,
@@ -205,458 +212,221 @@ class ComprehensiveArticleScraper:
         }
     
     def find_articles_on_page(self, soup, base_url, section_name=""):
-        """Find all articles on a page using multiple strategies"""
+        """Find all articles on a page with better filtering"""
         articles = []
         
-        # For main pages, be more aggressive in finding articles
-        is_main_page = section_name in ["Main Page", ""]
+        # Look for standard article containers
+        article_blocks = soup.find_all(['article', 'div'], class_=re.compile(r'(article|post|news|story|item|card)', re.I))
         
-        if is_main_page:
-            print(f"  🏠 Scanning main page for ALL article sections...")
-            
-            # Strategy for main page: Look for section containers first
-            section_containers = soup.find_all(['div', 'section'], class_=re.compile(r'(news|article|story|content|main|home|feed)', re.I))
-            if not section_containers:
-                section_containers = soup.find_all(['div', 'section'], id=re.compile(r'(news|article|story|content|main|home|feed)', re.I))
-            
-            print(f"    🔍 Found {len(section_containers)} potential section containers")
-            
-            # Look for articles in each container
-            for container in section_containers:
-                container_articles = self.extract_articles_from_container(container, base_url, section_name)
-                articles.extend(container_articles)
+        # Fallback to any block with heading and link
+        if len(article_blocks) < 5:
+            potential_blocks = soup.find_all(['div', 'li'])
+            article_blocks.extend([
+                b for b in potential_blocks 
+                if b.find(['h1', 'h2', 'h3']) and b.find('a', href=True)
+                and len(b.get_text(strip=True)) > 50
+                and b not in article_blocks
+            ])
         
-        # Strategy 1: Look for article tags
-        article_blocks = soup.find_all('article')
-        
-        # Strategy 2: Look for common article containers with expanded selectors for main page
-        if not article_blocks or is_main_page:
-            container_selectors = [
-                'article', '.post', '.article', '.news-item', '.blog-post', '.story',
-                '.entry', '.news-card', '.article-card', '.story-card',
-                '.post-item', '.content-item', '.news-list-item', '.feed-item',
-                '[class*="post"]', '[class*="article"]', '[class*="news"]',
-                '[class*="story"]', '[class*="item"]', '[class*="card"]',
-                '.item', '.list-item', '.media', '.media-object'
-            ]
-            
-            all_blocks = []
-            for selector in container_selectors:
-                found_blocks = soup.select(selector)
-                if found_blocks:
-                    all_blocks.extend(found_blocks)
-                    if is_main_page:
-                        print(f"    📋 Found {len(found_blocks)} blocks using selector: {selector}")
-            
-            # Remove duplicates while preserving order
-            seen = set()
-            article_blocks = []
-            for block in all_blocks:
-                if id(block) not in seen:
-                    article_blocks.append(block)
-                    seen.add(id(block))
-        
-        # Strategy 3: Look for list items that might contain articles
-        if not article_blocks or is_main_page:
-            list_selectors = ['li', '.list-item', '.item', 'tr']
-            for selector in list_selectors:
-                potential_blocks = soup.select(selector)
-                valid_blocks = []
-                for block in potential_blocks:
-                    if (block.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']) and 
-                        block.find('a') and 
-                        len(block.get_text(strip=True)) > 30):
-                        valid_blocks.append(block)
-                
-                if valid_blocks:
-                    article_blocks.extend(valid_blocks)
-                    if is_main_page:
-                        print(f"    📋 Found {len(valid_blocks)} list items with articles")
-        
-        # Strategy 4: Aggressive search for main page - any div with title and link
-        if is_main_page:
-            print(f"    🔍 Performing aggressive search for missed articles...")
-            potential_articles = soup.find_all('div')
-            additional_blocks = []
-            for div in potential_articles:
-                # Check if div has heading and link and meaningful content
-                if (div.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']) and 
-                    div.find('a', href=True) and 
-                    len(div.get_text(strip=True)) > 40):
-                    
-                    # Avoid duplicates
-                    if div not in article_blocks:
-                        additional_blocks.append(div)
-            
-            article_blocks.extend(additional_blocks)
-            print(f"    📋 Found {len(additional_blocks)} additional article blocks")
-        
-        print(f"  📰 Total potential article blocks found: {len(article_blocks)}")
-        
-        # Extract data from all found blocks
-        for i, block in enumerate(article_blocks):
+        for block in article_blocks:
             try:
                 article_data = self.extract_article_data(block, base_url, section_name)
-                
-                # Only add if we found meaningful title and it's not a duplicate
-                if (article_data['title'] != "No Title" and 
-                    len(article_data['title']) > 5 and 
-                    article_data['url'] not in self.visited_urls and
-                    not any(skip_word in article_data['title'].lower() for skip_word in ['menu', 'navigation', 'search', 'login'])):
-                    
+                if article_data:
                     articles.append(article_data)
                     self.visited_urls.add(article_data['url'])
-                    print(f"    ✅ [{i+1}] {article_data['title'][:70]}...")
-                    
             except Exception as e:
-                print(f"    ❌ Error extracting article {i+1}: {str(e)}")
+                print(f"Error extracting article: {str(e)}")
                 continue
         
         return articles
-    
-    def extract_articles_from_container(self, container, base_url, section_name):
-        """Extract articles from a specific container/section"""
-        articles = []
-        
-        # Look for article elements within the container
-        article_elements = container.find_all(['article', 'div', 'li'], class_=re.compile(r'(item|card|post|article|news|story)', re.I))
-        
-        if not article_elements:
-            # Fallback: look for any element with heading and link
-            article_elements = container.find_all(['div', 'li'])
-            article_elements = [elem for elem in article_elements if elem.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']) and elem.find('a')]
-        
-        for element in article_elements:
-            try:
-                article_data = self.extract_article_data(element, base_url, section_name)
-                if (article_data['title'] != "No Title" and 
-                    len(article_data['title']) > 5 and 
-                    article_data['url'] not in self.visited_urls):
-                    articles.append(article_data)
-                    self.visited_urls.add(article_data['url'])
-            except:
-                continue
-        
-        return articles
-    
-    def find_load_more_buttons(self, soup, current_url):
-        """Find 'Load More', 'View More', or similar buttons/links"""
-        load_more_selectors = [
-            'a[class*="load"]', 'a[class*="more"]', 'a[class*="show"]',
-            'button[class*="load"]', 'button[class*="more"]', 'button[class*="show"]',
-            '.load-more', '.view-more', '.show-more', '.read-more',
-            '.pagination-next', '.next-page', 'a[rel="next"]'
-        ]
-        
-        for selector in load_more_selectors:
-            load_elem = soup.select_one(selector)
-            if load_elem:
-                if load_elem.name == 'a' and load_elem.get('href'):
-                    href = load_elem['href']
-                    if not href.startswith('#') and not href.startswith('javascript'):
-                        return urljoin(current_url, href)
-                elif load_elem.get('data-url'):
-                    return urljoin(current_url, load_elem['data-url'])
-        
-        # Look for text-based "more" links
-        for link in soup.find_all('a', href=True):
-            link_text = link.get_text(strip=True).lower()
-            if any(phrase in link_text for phrase in ['view more', 'load more', 'show more', 'see more', 'more news', 'next page', 'continue']):
-                href = link['href']
-                if not href.startswith('#') and not href.startswith('javascript'):
-                    return urljoin(current_url, href)
-        
-        return None
     
     def find_section_urls(self, soup, base_url):
-        """Find all section URLs from navigation menu"""
-        section_data = {}  # Dictionary to store URL -> section name mapping
+        """Find all section URLs with better filtering"""
+        section_data = {}
         
-        print("🔍 Looking for navigation sections...")
-        
-        # Look for navigation menus with priority order
-        nav_selectors = [
-            'nav', '.navigation', '.nav', '.menu', '.navbar',
-            '.main-nav', '.primary-nav', '.header-nav',
-            '.nav-menu', '.menu-list', '.nav-list',
-            '.top-nav', '.site-nav', '.global-nav'
-        ]
-        
-        nav_elements = []
-        for selector in nav_selectors:
-            found_navs = soup.select(selector)
-            if found_navs:
-                nav_elements.extend(found_navs)
-                print(f"  📋 Found navigation using selector: {selector}")
-        
-        # Also look in header areas
-        header_selectors = ['header', '.header', '.site-header', '.main-header']
-        for selector in header_selectors:
-            header_elements = soup.select(selector)
-            for header in header_elements:
-                nav_in_header = header.find_all('a', href=True)
-                if nav_in_header:
-                    nav_elements.append(header)
-                    print(f"  📋 Found navigation links in: {selector}")
-        
-        # If still no nav found, look for any links that might be sections
-        if not nav_elements:
-            print("  ⚠️ No specific navigation found, scanning entire page...")
-            nav_elements = [soup]  # Use entire document
-        
+        # Section keywords to look for
         section_keywords = [
-            'news', 'world', 'business', 'politics', 'sports', 'tech', 'technology',
-            'science', 'health', 'entertainment', 'lifestyle', 'culture',
-            'economy', 'finance', 'international', 'domestic', 'local',
-            'breaking', 'latest', 'trending', 'opinion', 'analysis',
-            'china', 'asia', 'europe', 'america', 'africa', 'global',
-            'society', 'travel', 'food', 'auto', 'education', 'military'
+            'news', 'world', 'business', 'politics', 'sports', 'tech',
+            'science', 'health', 'entertainment', 'lifestyle', 'opinion',
+            'breaking', 'latest', 'analysis', 'editorial', 'feature',
+            'china', 'asia', 'europe', 'america', 'africa', 'global'
         ]
         
+        # Keywords to avoid
         avoid_keywords = [
             'contact', 'about', 'login', 'register', 'search', 'archive',
-            'subscribe', 'newsletter', 'rss', 'sitemap', 'privacy', 'terms',
-            'careers', 'jobs', 'advertise', 'feedback', 'help', 'support'
+            'subscribe', 'newsletter', 'rss', 'sitemap', 'privacy', 'terms'
         ]
         
+        # Look in navigation elements
+        nav_elements = soup.select('nav, .navigation, .nav, .menu, .navbar, header, .header')
+        if not nav_elements:
+            nav_elements = [soup]  # Fallback to entire document
+        
         for nav_elem in nav_elements:
-            links = nav_elem.find_all('a', href=True)
-            print(f"  🔗 Checking {len(links)} links in navigation...")
-            
-            for link in links:
-                href = link.get('href', '').strip()
-                link_text = link.get_text(strip=True)
+            for link in nav_elem.find_all('a', href=True):
+                href = link['href'].strip()
+                text = link.get_text(strip=True)
                 
-                # Skip empty or invalid links
-                if not href or href.startswith('#') or href.startswith('javascript') or href.startswith('mailto'):
+                # Skip invalid links
+                if not href or href.startswith(('#', 'javascript:', 'mailto:')):
                     continue
                 
-                # Create full URL
                 full_url = urljoin(base_url, href)
                 
                 # Skip if same as base URL
-                if full_url == base_url or full_url == base_url + '/':
+                if full_url == base_url.rstrip('/') + '/':
                     continue
                 
-                # Clean link text
-                clean_text = link_text.lower().strip()
-                clean_href = href.lower()
+                # Check if it's a section link
+                lower_text = text.lower()
+                lower_href = href.lower()
                 
-                # Check if it's likely a section URL
-                is_section = False
-                section_name = link_text.strip()
+                is_section = (
+                    any(kw in lower_text for kw in section_keywords) or
+                    any(kw in lower_href for kw in section_keywords) or
+                    any(p in lower_href for p in ['/news/', '/category/', '/section/'])
+                )
                 
-                # Method 1: Check if link text contains section keywords
-                if any(keyword in clean_text for keyword in section_keywords):
-                    is_section = True
-                    print(f"    ✅ Found by text keyword: '{link_text}' -> {full_url}")
+                # Skip non-section links
+                if not is_section or any(kw in lower_text or kw in lower_href for kw in avoid_keywords):
+                    continue
                 
-                # Method 2: Check if URL path contains section keywords  
-                elif any(keyword in clean_href for keyword in section_keywords):
-                    is_section = True
-                    # Extract section name from URL if text is generic
-                    if len(clean_text) < 3 or clean_text in ['more', 'all', 'view']:
-                        section_name = href.split('/')[-1].replace('-', ' ').replace('_', ' ').title()
-                    print(f"    ✅ Found by URL keyword: '{section_name}' -> {full_url}")
-                
-                # Method 3: Short navigation text (likely sections)
-                elif len(link_text.split()) <= 2 and len(link_text) > 2 and link_text.isalpha():
-                    is_section = True
-                    print(f"    ✅ Found by short text: '{link_text}' -> {full_url}")
-                
-                # Method 4: Check URL structure (common section patterns)
-                elif any(pattern in clean_href for pattern in ['/news/', '/category/', '/section/']):
-                    is_section = True
+                # Clean section name
+                section_name = text.strip()
+                if not section_name or len(section_name) < 2:
                     section_name = href.split('/')[-1].replace('-', ' ').replace('_', ' ').title()
-                    print(f"    ✅ Found by URL pattern: '{section_name}' -> {full_url}")
                 
-                # Skip if contains avoid keywords
-                if any(avoid in clean_text or avoid in clean_href for avoid in avoid_keywords):
-                    is_section = False
-                
-                if is_section:
-                    # Clean up section name
-                    if not section_name or section_name.lower() in ['more', 'all', 'view', 'news']:
-                        section_name = href.split('/')[-1].replace('-', ' ').replace('_', ' ').title()
-                    
-                    section_data[full_url] = section_name
-        
-        print(f"  🎯 Total sections discovered: {len(section_data)}")
-        for url, name in section_data.items():
-            print(f"    📂 {name}: {url}")
+                section_data[full_url] = section_name
         
         return section_data
     
-    def scrape_section_completely(self, section_url, section_name="", max_pages=50):
-        """Scrape all articles from a section by following 'View More' links"""
-        print(f"\n🏷️  Scraping section: {section_name or section_url}")
+    def scrape_section_completely(self, section_url, section_name="", max_pages=5):
+        """Scrape a section completely with pagination"""
         section_articles = []
         current_url = section_url
         page_count = 0
-        section_visited = set()
         
         while current_url and page_count < max_pages:
-            if current_url in section_visited:
-                print(f"    🔄 Loop detected, stopping...")
-                break
-            
-            section_visited.add(current_url)
-            print(f"    📄 Page {page_count + 1}: {current_url}")
-            
             soup = self.get_page_content(current_url)
             if not soup:
-                print(f"    ❌ Failed to load page")
                 break
             
-            # Extract articles from current page
+            # Get articles from current page
             page_articles = self.find_articles_on_page(soup, current_url, section_name)
+            section_articles.extend(page_articles)
             
-            if page_articles:
-                section_articles.extend(page_articles)
-                print(f"    ✅ Found {len(page_articles)} articles on this page")
-            else:
-                print(f"    ⚠️  No articles found on this page")
+            # Find next page
+            next_url = None
+            next_link = soup.find('a', text=re.compile(r'next|more', re.I))
+            if next_link and next_link.get('href'):
+                next_url = urljoin(current_url, next_link['href'])
             
-            # Find next page / load more
-            next_url = self.find_load_more_buttons(soup, current_url)
-            if next_url and next_url != current_url:
-                current_url = next_url
-                page_count += 1
-            else:
-                print(f"    🏁 No more pages found")
+            if not next_url or next_url == current_url:
                 break
+            
+            current_url = next_url
+            page_count += 1
         
-        print(f"  📊 Section total: {len(section_articles)} articles")
         return section_articles
     
-    def scrape_all_news_comprehensive(self, start_url, max_sections=20):
-        """Comprehensively scrape all news from all sections of a website"""
-        print(f"🚀 Starting comprehensive news scraping from: {start_url}")
-        print("=" * 80)
+    def scrape_all_news(self, start_url, max_sections=20):
+        """Main scraping function"""
+        print(f"🚀 Starting scraping from: {start_url}")
         
-        # Step 1: Get main page and find all section URLs
-        print("🔍 Step 1: Finding all news sections...")
+        # Get main page
         soup = self.get_page_content(start_url)
         if not soup:
-            print("❌ Failed to load main page")
             return []
         
-        # Extract articles from main page first
-        print("\n📰 STEP 1A: Comprehensive main page article extraction...")
-        print("🔍 Scanning for ALL articles on homepage (Home, China, World, etc.)")
-        main_articles = self.find_articles_on_page(soup, start_url, "Main Page")
-        print(f"✅ Found {len(main_articles)} articles on main page")
+        # Get articles from main page
+        main_articles = self.find_articles_on_page(soup, start_url, "Main")
         self.all_articles.extend(main_articles)
         
-        # Find all section URLs with names
-        print(f"\n📰 STEP 1B: Finding navigation sections...")
+        # Find sections
         section_data = self.find_section_urls(soup, start_url)
-        print(f"✅ Found {len(section_data)} sections to scrape")
         
-        # Step 2: Scrape each section completely
-        print(f"\n🔄 STEP 2: Scraping each section comprehensively...")
-        print("=" * 60)
-        
-        section_items = list(section_data.items())[:max_sections]
-        
-        for i, (section_url, section_name) in enumerate(section_items, 1):
+        # Scrape each section
+        for section_url, section_name in list(section_data.items())[:max_sections]:
             try:
-                print(f"\n[{i}/{len(section_items)}] Processing section: {section_name}")
-                print(f"    🔗 URL: {section_url}")
-                
+                print(f"Scraping section: {section_name}")
                 section_articles = self.scrape_section_completely(section_url, section_name)
                 self.all_articles.extend(section_articles)
-                
             except Exception as e:
-                print(f"❌ Error scraping section {section_name} ({section_url}): {str(e)}")
+                print(f"Error scraping section {section_name}: {str(e)}")
                 continue
         
         # Remove duplicates
         unique_articles = []
         seen_urls = set()
-        
         for article in self.all_articles:
             if article['url'] not in seen_urls:
                 unique_articles.append(article)
                 seen_urls.add(article['url'])
         
-        print(f"\n🎉 Comprehensive scraping completed!")
-        print(f"📊 Total unique articles found: {len(unique_articles)}")
-        print(f"🗂️  Sections processed: {len(set(article.get('section', '') for article in unique_articles))}")
-        
         return unique_articles
 
 def save_to_csv(data, filename):
-    """Save article data to CSV file with section information"""
+    """Save data to CSV with proper formatting"""
     try:
         os.makedirs(data_path, exist_ok=True)
         full_path = os.path.join(data_path, filename)
         
         with open(full_path, 'w', newline='', encoding='utf-8') as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(["date", "url", "title", "description", "section"])
+            writer.writerow(["Date", "Section", "URL", "Title", "Description"])
             
             for article in data:
                 writer.writerow([
                     article['date'],
-                    article['url'], 
+                    article['section'],
+                    article['url'],
                     article['title'],
-                    article['description'],
-                    article.get('section', '')
+                    article['description']
                 ])
         
-        print(f"\n✅ Data successfully saved to: {full_path}")
+        print(f"✅ Data saved to: {full_path}")
         return full_path
-        
     except Exception as e:
-        print(f"❌ Error saving to CSV: {str(e)}")
+        print(f"❌ Error saving CSV: {str(e)}")
         return None
 
 def main():
-    print("🌍 Comprehensive News Website Scraper")
-    print("=" * 60)
-    print("This scraper will:")
-    print("• Find all news sections on the website")
-    print("• Visit each section and scrape ALL articles")
-    print("• Follow 'View More' / 'Load More' links")
-    print("• Get current and previous articles")
+    print("🌍 Improved News Website Scraper")
     print("=" * 60)
     
     # Get user input
-    start_url = input("\n🔗 Enter the news website URL (e.g., https://www.cgtn.com): ").strip()
-    
+    start_url = input("\n🔗 Enter the news website URL: ").strip()
     if not start_url:
         print("❌ No URL provided!")
         return
     
-    # Add protocol if missing
     if not start_url.startswith(('http://', 'https://')):
         start_url = 'https://' + start_url
     
-    filename = input("💾 Enter filename to save (default: comprehensive_news.csv): ").strip()
+    filename = input("💾 Enter filename to save (default: news_data.csv): ").strip()
     if not filename:
-        filename = "comprehensive_news.csv"
+        filename = "news_data.csv"
     elif not filename.endswith('.csv'):
         filename += ".csv"
     
-    # Ask for max sections
-    max_sections_input = input("🔢 Maximum sections to scrape (default: 20): ").strip()
     max_sections = 20
-    if max_sections_input:
+    max_input = input("🔢 Maximum sections to scrape (default: 20): ").strip()
+    if max_input:
         try:
-            max_sections = int(max_sections_input)
+            max_sections = int(max_input)
         except ValueError:
-            print("Invalid number, using default: 20")
+            print("⚠️ Invalid number, using default 20")
     
-    # Initialize scraper and start comprehensive scraping
-    scraper = ComprehensiveArticleScraper(delay_range=(2, 4))  # Slightly longer delays
+    # Start scraping
+    scraper = ImprovedNewsScraper(delay_range=(2, 4))
     
     try:
-        articles = scraper.scrape_all_news_comprehensive(start_url, max_sections)
+        articles = scraper.scrape_all_news(start_url, max_sections)
         
         if articles:
-            print(f"\n📈 Final Results:")
-            print(f"   📰 Total articles: {len(articles)}")
+            print(f"\n📊 Results:")
+            print(f"   Total articles: {len(articles)}")
             
             # Show section breakdown
             sections = {}
@@ -664,7 +434,7 @@ def main():
                 section = article.get('section', 'Unknown')
                 sections[section] = sections.get(section, 0) + 1
             
-            print(f"   🗂️  Sections found: {len(sections)}")
+            print(f"   Sections found: {len(sections)}")
             for section, count in sorted(sections.items(), key=lambda x: x[1], reverse=True):
                 print(f"      • {section}: {count} articles")
             
@@ -672,25 +442,17 @@ def main():
             saved_path = save_to_csv(articles, filename)
             
             if saved_path:
-                print(f"\n🎯 Success! Comprehensive news data saved to:")
-                print(f"   📁 {saved_path}")
-            
+                print(f"\n✅ Success! Data saved to: {saved_path}")
         else:
-            print("⚠️ No articles were found. Possible reasons:")
-            print("  • Website structure not supported")
-            print("  • Website blocks automated scraping")
-            print("  • Network connectivity issues")
-            print("  • URL doesn't contain news sections")
+            print("⚠️ No articles found. Check website structure or try different URL.")
             
     except KeyboardInterrupt:
-        print("\n\n⏹️ Scraping interrupted by user")
+        print("\n⏹️ Scraping interrupted by user")
         if scraper.all_articles:
-            print(f"💾 Saving {len(scraper.all_articles)} articles collected so far...")
             save_to_csv(scraper.all_articles, f"partial_{filename}")
     except Exception as e:
-        print(f"\n❌ An error occurred: {str(e)}")
+        print(f"\n❌ Error: {str(e)}")
         if scraper.all_articles:
-            print(f"💾 Saving {len(scraper.all_articles)} articles collected so far...")
             save_to_csv(scraper.all_articles, f"partial_{filename}")
 
 if __name__ == "__main__":
